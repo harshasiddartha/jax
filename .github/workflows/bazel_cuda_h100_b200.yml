@@ -46,6 +46,10 @@ on:
         description: 'Custom Bazel targets to run (space-separated, overrides defaults)'
         type: string
         required: false
+      profile-memory:
+        description: 'Profile peak memory usage of tests?'
+        type: boolean
+        default: false
   pull_request:
     branches:
       - main
@@ -121,11 +125,16 @@ jobs:
           JAXCI_EXCLUDE_TEST_TARGETS: 'PmapTest.testSizeOverflow|.*InterpretTest.*'
           JAXCI_TEST_TIMEOUT: '420'
           CUSTOM_BAZEL_TARGETS: ${{ github.event.inputs.bazel_targets }}
+          JAXCI_PROFILE_MEMORY: true
         run: |
           if [[ -n "${CUSTOM_BAZEL_TARGETS}" ]]; then
             export JAXCI_BAZEL_TARGETS="${CUSTOM_BAZEL_TARGETS// /$'\n'}"
           fi
           bash ./ci/run_bazel_cuda_targeted_tests.sh
+      - name: Aggregate Memory Profile JSON
+        continue-on-error: true
+        if: always()
+        run: python3 ci/utilities/parse_memory_profiles.py
       - name: Upload test artifacts
         if: always()
         continue-on-error: true
