@@ -385,6 +385,44 @@ class LayoutInferenceTest(parameterized.TestCase):
     ):
       mgpu.infer_layout(self.module)
 
+  def test_unsatisfiable_dynamic_index_suggests_multiple_of(self):
+    shape = (64, 64)
+    elt_ty = ir.BF16Type.get()
+
+    with ir.InsertionPoint(self.module.body):
+      gmem_ty = ir.MemRefType.get(shape, elt_ty)
+      smem_ty = ir.MemRefType.get(shape, elt_ty, memory_space=mgpu.utils.smem())
+      barrier_ty = mgpu.dialect.BarrierType.get()
+      gmem_ref, smem_ref, barrier = undefs(gmem_ty, smem_ty, barrier_ty)
+
+      transforms = ir.ArrayAttr.get([
+          mgpu.dialect.TileTransformAttr.get((8, 32)),
+          mgpu.dialect.SwizzleTransformAttr.get(64),
+      ])
+      smem_ref = mgpu.dialect.with_transforms(smem_ref, transforms)
+
+      i32 = ir.IntegerType.get_signless(32)
+      index_gmem_ty = ir.MemRefType.get((), i32)
+      [index_gmem_ref] = undefs(index_gmem_ty)
+      idx = memref.LoadOp(index_gmem_ref, []).result
+      zero = arith.constant(i32, 0)
+      mgpu.dialect.AsyncLoadOp(
+          source=gmem_ref,
+          destination=smem_ref,
+          barrier=barrier,
+          indices=[idx, zero],
+          slice_lengths=shape,
+          collective=ir.ArrayAttr.get([]),
+      )
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "Failed to infer a possible set of layouts. This should only happen if"
+        " user-provided layout casts are unsatisfiable. You need to prove"
+        " divisibility, e.g. using plgpu.multiple_of.",
+    ):
+      mgpu.infer_layout(self.module)
+
   def test_infer_vector_concat_layout(self):
     shape1, shape2 = (64, 32), (128, 32)
     layout = mgpu.WGMMA_LAYOUT
