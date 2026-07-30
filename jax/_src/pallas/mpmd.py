@@ -317,6 +317,12 @@ def _mpmd_map_partial_eval_custom(saveable, unks_in, inst_in, eqn):
 pe.partial_eval_jaxpr_custom_rules[mpmd_map_p] = _mpmd_map_partial_eval_custom
 
 
+def _is_semaphore(aval: Any) -> bool:
+  from jax._src.pallas.mosaic import core as tpu_core  # pyrefly: ignore[missing-import]
+  memory_space = getattr(aval, "memory_space", None)
+  return memory_space == tpu_core.MemorySpace.SEMAPHORE
+
+
 def _mpmd_map_batching_rule(
     axis_data,
     args,
@@ -350,48 +356,53 @@ def _mpmd_map_batching_rule(
             " inputs instead."
         )
 
-  if axis_data.size != 1:
-    raise NotImplementedError(
-        "mpmd_map only supports batching with a batch dimension of 1, got"
-        f" {axis_data.size}"
-    )
+  # Move the batch dimension to axis 0 for all batched args.
+  moved_args = [
+      batching.moveaxis(arg, dim, 0) if dim is not None else arg
+      for arg, dim in zip(args, dims)
+  ]
 
-  squeezed_args = []
-  for arg, dim in zip(args, dims):
-    if dim is None:
-      squeezed_args.append(arg)
-    elif isinstance(arg_aval := jax_core.typeof(arg), state.AbstractRef):
-      # This is a bit of a hack. We rely on the fact that JAX does not have
-      # true mutable refs, and thus it is effectively free to squeeze-copy
-      # the underlying array like we do below.
-      #
-      # TODO(slebedev): Add first class support for ``TransformedRef``s to
-      # ``mpmd_map`` and get rid of this.
-      squeezed_args.append(
-          jax_core.new_ref(
-              jnp.squeeze(arg[...], dim),
-              memory_space=arg_aval.memory_space,
-          )
-      )
-    else:
-      squeezed_args.append(jnp.squeeze(arg, dim))
+  # Batch each jaxpr: in_axes for the jaxpr invars are 0 for batched input
+  # args, not_mapped for unbatched input args, 0 for output refs (which will
+  # gain a batch dim), and not_mapped for scratch refs if they are semaphores
+  # or 0 for array scratch refs.
+  num_in = len(args)
+  num_out = len(out_avals)
+  batched_jaxprs = []
+  all_meshes = (*meshes, *params.get("external_meshes", ()))
+  for mesh, jaxpr in zip(meshes, jaxprs):
+    scratch_invars = jaxpr.invars[(num_in+num_out):]
+    scratch_in_axes = tuple(
+        None if _is_semaphore(v.aval) else 0 for v in scratch_invars
+    )
+    in_axes = (
+        tuple(0 if d is not None else None for d in dims)
+        + (0,) * num_out
+        + scratch_in_axes
+    )
+    with mpmd_map_tracing_context(mesh, all_meshes):
+      batching._batch_jaxpr2.cache_clear()
+      batched_jaxpr, _ = batching.batch_jaxpr2(jaxpr, axis_data, in_axes)
+    batched_jaxprs.append(batched_jaxpr)
+
+  # Update out_avals to include the batch dimension at axis 0.
+  batched_out_avals = tuple(
+      a.update(inner_aval=a.inner_aval.update(shape=(axis_data.size, *a.inner_aval.shape)))  # pyrefly: ignore[missing-attribute]
+      if isinstance(a, state.AbstractRef)
+      else a.update(shape=(axis_data.size, *a.shape))
+      for a in out_avals
+  )
 
   outs = mpmd_map_p.bind(
-      *squeezed_args,
-      jaxprs=jaxprs,
+      *moved_args,
+      jaxprs=tuple(batched_jaxprs),
       meshes=meshes,
-      out_avals=out_avals,
+      out_avals=batched_out_avals,
       input_output_aliases=input_output_aliases,
       **params,
   )
 
-  for arg, squeezed_arg, dim in zip(args, squeezed_args, dims):
-    if dim is None:
-      continue
-    if isinstance(jax_core.typeof(arg), state.AbstractRef):
-      arg[...] = jnp.expand_dims(jax_core.freeze(squeezed_arg), dim)
-
-  return [jnp.expand_dims(out, 0) for out in outs], (0,) * len(outs)
+  return outs, (0,) * len(outs)
 
 
 batching.fancy_primitive_batchers[mpmd_map_p] = _mpmd_map_batching_rule

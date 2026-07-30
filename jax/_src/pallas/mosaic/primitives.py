@@ -561,6 +561,22 @@ def dma_start_discharge_rule(
 state_discharge.register_discharge_rule(dma_start_p)(dma_start_discharge_rule)
 
 
+def _unwrap_batch_tracer(val):
+  while isinstance(val, batching.BatchTracer):
+    val = val.val
+  return val
+
+
+def _dma_start_batch_rule(args, dims, **params):
+  del dims
+  unwrapped_args = [_unwrap_batch_tracer(arg) for arg in args]
+  dma_start_p.bind(*unwrapped_args, **params)
+  return [], ()
+
+
+batching.primitive_batchers[dma_start_p] = _dma_start_batch_rule
+
+
 dma_wait_p = jax_core.Primitive('dma_wait')
 dma_wait_p.multiple_results = True
 
@@ -686,6 +702,16 @@ def dma_wait_discharge_rule(
   new_vals += (None,) * len(tree_util.tree_leaves(device_id_aval)) # device_id
   return new_vals, []
 state_discharge.register_discharge_rule(dma_wait_p)(dma_wait_discharge_rule)
+
+
+def _dma_wait_batch_rule(args, dims, **params):
+  del dims
+  unwrapped_args = [_unwrap_batch_tracer(arg) for arg in args]
+  dma_wait_p.bind(*unwrapped_args, **params)
+  return [], ()
+
+
+batching.primitive_batchers[dma_wait_p] = _dma_wait_batch_rule
 
 def _get_ref_and_transforms(ref):
   if isinstance(ref, state.TransformedRef):

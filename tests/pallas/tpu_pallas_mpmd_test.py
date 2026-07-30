@@ -633,25 +633,56 @@ class MpmdTest(PallasSCTest):
     ):
       jax.vmap(run_kernel)(jnp.int32(0)[jnp.newaxis])
 
-  def test_vmap_with_refs(self):
+  @parameterized.parameters([TC, SCV])
+  def test_vmap_with_refs(self, core_type):
+    @jax.jit
     def run_kernel(x):
-      x_hbm_ref = jax.new_ref(x)
+      @jax.vmap
+      @pl.kernel(
+          mesh=from_core_type(core_type),
+          scratch_types=(pltpu.VMEM(x.shape[1:], x.dtype),
+                         pltpu.SemaphoreType.DMA(()),),
+          out_type=jax.typeof(x[0])
+      )
+      def kernel(x_ref, out_ref, scratch_ref, sem_ref):
+        pltpu.async_copy(x_ref, scratch_ref, sem_ref).wait()
+        scratch_ref[...] += 1
+        pltpu.async_copy(scratch_ref, out_ref, sem_ref).wait()
+      return kernel(x)
 
+    vmap_dim = 256
+    # For some reason SCV allocates 1x128 for each (1, 8) in-vmap slice, making
+    # the total DMA size way larger.
+    in_vmap_shape = (16, 128) if core_type == TC else (1, 8)
+    x = jnp.arange(vmap_dim * np.prod(in_vmap_shape), dtype=jnp.int32).reshape(
+        vmap_dim, *in_vmap_shape
+    )
+    out = run_kernel(x)
+    np.testing.assert_array_equal(out, x + 1)
+
+  def test_vmap_with_refs_non_zero_axis(self):
+    vmap_dim = 16
+    @jax.jit
+    def run_kernel(x):
+      @functools.partial(jax.vmap, in_axes=1, out_axes=1)
       @pl.kernel(
           mesh=from_core_type(SCV),
-          scratch_types=(pltpu.VMEM.like(x),),
+          scratch_types=(pltpu.VMEM((x.shape[0],), x.dtype),
+                         pltpu.SemaphoreType.DMA(()),),
+          out_type=jax.typeof(x[:, 0])
       )
-      def kernel(scratch_ref):
-        pltpu.sync_copy(x_hbm_ref, scratch_ref)
+      def kernel(x_ref, out_ref, scratch_ref, sem_ref):
+        pltpu.async_copy(x_ref, scratch_ref, sem_ref).wait()
         scratch_ref[...] += 1
-        pltpu.sync_copy(scratch_ref, x_hbm_ref)
+        pltpu.async_copy(scratch_ref, out_ref, sem_ref).wait()
+      return kernel(x)
 
-      _ = kernel()
-      return jax.freeze(x_hbm_ref)
-
-    x = jnp.arange(self.sc_info.num_lanes, dtype=jnp.int32)
-    out = jax.vmap(run_kernel)(x[jnp.newaxis])
-    np.testing.assert_array_equal(out, x[jnp.newaxis] + 1)
+    x = jnp.arange(self.sc_info.num_lanes * vmap_dim, dtype=jnp.int32).reshape(
+        self.sc_info.num_lanes, vmap_dim
+    )
+    assert x.shape == (self.sc_info.num_lanes, vmap_dim)
+    out = run_kernel(x)
+    np.testing.assert_array_equal(out, x + 1)
 
   def test_remat_with_checkpoint(self):
     mesh = pltpu.TensorCoreMesh(axis_name="tc", num_cores=1)
