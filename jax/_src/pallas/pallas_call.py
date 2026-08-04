@@ -1279,7 +1279,7 @@ def _pallas_call(
 
     flat_out_avals = tuple(
         pallas_core._convert_out_shape_to_aval(v) for v in flat_out_shapes
-    )
+    ) 
 
     in_origins = tuple(f"args{tree_util.keystr(p)}" for p in in_paths)
     out_origins = tuple(f"outputs{tree_util.keystr(p)}" for p in out_paths)
