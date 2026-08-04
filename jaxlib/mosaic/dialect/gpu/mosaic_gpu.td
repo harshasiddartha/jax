@@ -334,6 +334,9 @@ def MosaicGPU_OOBFillMode : I32EnumAttr<"OOBFillMode",
   let cppNamespace = "::mosaic_gpu";
 }
 
+def MosaicGPU_B6x16P32 : MosaicGPU_Type<"B6x16P32", "b6x16_p32", [MemRefElementTypeInterface]>;
+def MosaicGPU_P2B6 : MosaicGPU_Type<"P2B6", "p2b6", [MemRefElementTypeInterface]>;
+
 def MosaicGPU_AsyncLoadOp : Op<MosaicGPU_Dialect, "async_load",
       [AttrSizedOperandSegments]> {
   let summary = "Schedules an async load of a MemRef from GMEM to SMEM";
